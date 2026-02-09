@@ -19,12 +19,13 @@
       padding: 10px 12px;
       border-radius: 10px;
       box-shadow: 0 6px 20px rgba(0,0,0,.12);
-      max-width: 340px;
+      max-width: 360px;
     }
     .hud b { display:block; margin-bottom:4px; }
     .hud small { color:#444; }
 
-    .leaflet-control-mypos button{
+    /* Boutons Leaflet */
+    .leaflet-control-skytrack button{
       width: 40px;
       height: 40px;
       border: none;
@@ -35,7 +36,7 @@
       font-size: 18px;
       line-height: 40px;
     }
-    .leaflet-control-mypos button:hover{ background: rgba(255,255,255,1); }
+    .leaflet-control-skytrack button:hover { background: rgba(255,255,255,1); }
 
     .planeWrap { width: 32px; height: 32px; }
   </style>
@@ -56,8 +57,7 @@
     // =========================
     // Carte
     // =========================
-    const map = L.map('map').setView([20, 0], 2); // fallback monde
-
+    const map = L.map('map').setView([20, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap'
@@ -67,7 +67,7 @@
     const markers = new Map();
 
     // =========================
-    // Icône avion orange (SVG) sans stroke (anti rouge)
+    // Icône avion orange (SVG) sans stroke
     // =========================
     const planeIcon = L.divIcon({
       className: '',
@@ -87,7 +87,7 @@
     });
 
     // =========================
-    // Position utilisateur + bouton
+    // Position utilisateur
     // =========================
     let myPosMarker = null;
     let myPosCircle = null;
@@ -97,12 +97,8 @@
 
       if (!myPosMarker) {
         myPosMarker = L.circleMarker(latlng, {
-          radius: 6,
-          weight: 2,
-          opacity: 1,
-          fillOpacity: 0.8
-        }).addTo(map);
-        myPosMarker.bindPopup("Ma position");
+          radius: 6, weight: 2, opacity: 1, fillOpacity: 0.8
+        }).addTo(map).bindPopup("Ma position");
       } else {
         myPosMarker.setLatLng(latlng);
       }
@@ -111,10 +107,7 @@
         const r = Math.max(accuracyMeters, 25);
         if (!myPosCircle) {
           myPosCircle = L.circle(latlng, {
-            radius: r,
-            weight: 1,
-            opacity: 0.5,
-            fillOpacity: 0.08
+            radius: r, weight: 1, opacity: 0.5, fillOpacity: 0.08
           }).addTo(map);
         } else {
           myPosCircle.setLatLng(latlng);
@@ -128,7 +121,6 @@
         statusEl.textContent = "Géolocalisation non dispo";
         return;
       }
-
       statusEl.textContent = "Localisation…";
 
       navigator.geolocation.getCurrentPosition(
@@ -140,41 +132,55 @@
           showMyPosition(lat, lon, acc);
           if (center) map.setView([lat, lon], Math.max(map.getZoom(), 7));
 
-          refresh();
+          // On ne force PAS un refresh auto si OpenSky limite, mais on peut tenter une fois :
+          refresh(true);
         },
-        () => {
-          statusEl.textContent = "Localisation refusée / indisponible";
-        },
+        () => { statusEl.textContent = "Localisation refusée / indisponible"; },
         { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
       );
     }
 
-    // Centrage au chargement (si autorisé)
-    locateAndCenter({ center: true });
-
-    // Bouton 📍
-    const MyPosControl = L.Control.extend({
+    // =========================
+    // Boutons: 📍 + ↻
+    // =========================
+    const Controls = L.Control.extend({
       options: { position: 'topright' },
       onAdd: function() {
-        const container = L.DomUtil.create('div', 'leaflet-control leaflet-control-mypos');
-        const btn = L.DomUtil.create('button', '', container);
-        btn.type = 'button';
-        btn.title = 'Recentrer sur moi';
-        btn.innerHTML = '📍';
+        const container = L.DomUtil.create('div', 'leaflet-control leaflet-control-skytrack');
+
+        const btnLoc = L.DomUtil.create('button', '', container);
+        btnLoc.type = 'button';
+        btnLoc.title = 'Recentrer sur moi';
+        btnLoc.innerHTML = '📍';
+
+        const btnRef = L.DomUtil.create('button', '', container);
+        btnRef.type = 'button';
+        btnRef.title = 'Rafraîchir les avions';
+        btnRef.innerHTML = '↻';
+        btnRef.style.marginTop = '8px';
 
         L.DomEvent.disableClickPropagation(container);
-        L.DomEvent.on(btn, 'click', (e) => {
+
+        L.DomEvent.on(btnLoc, 'click', (e) => {
           L.DomEvent.preventDefault(e);
           locateAndCenter({ center: true });
+        });
+
+        L.DomEvent.on(btnRef, 'click', (e) => {
+          L.DomEvent.preventDefault(e);
+          refresh(true); // force
         });
 
         return container;
       }
     });
-    map.addControl(new MyPosControl());
+    map.addControl(new Controls());
+
+    // Centrage au chargement (si autorisé)
+    locateAndCenter({ center: true });
 
     // =========================
-    // Markers avions (rotation)
+    // Markers avions
     // =========================
     function upsertMarker(id, lat, lon, heading, label) {
       const rot = (heading == null || Number.isNaN(heading)) ? 0 : heading;
@@ -191,26 +197,23 @@
         m.setLatLng([lat, lon]);
         if (m.setRotationAngle) m.setRotationAngle(rot);
       }
-
       m.bindPopup(label);
     }
 
     // =========================
-    // Fetch robuste (2 proxys) + gestion 429 + non-JSON
+    // Fetch robuste (2 proxys) + gestion 429/non-JSON
     // =========================
     let inFlight = false;
     let lastFetch = 0;
+    let backoffUntil = 0;
 
     function buildProxyUrls(bbox) {
       const upstream = `https://opensky-network.org/api/states/all?${bbox}`;
       const u = encodeURIComponent(upstream);
-
-      // Proxy 1
-      const p1 = `https://corsproxy.io/?${u}`;
-      // Proxy 2
-      const p2 = `https://api.allorigins.win/raw?url=${u}`;
-
-      return [p1, p2];
+      return [
+        `https://corsproxy.io/?${u}`,
+        `https://api.allorigins.win/raw?url=${u}`
+      ];
     }
 
     async function fetchWithFallback(urls) {
@@ -219,14 +222,13 @@
       for (const url of urls) {
         try {
           const res = await fetch(url, { cache: "no-store" });
-
           const ct = (res.headers.get("content-type") || "").toLowerCase();
           const isJson = ct.includes("application/json");
 
           if (!res.ok) {
             const txt = await res.text().catch(() => "");
             if (res.status === 429 || txt.toLowerCase().includes("too many")) {
-              throw new Error("429 Too many requests (OpenSky limite)");
+              throw new Error("429 Too many requests");
             }
             throw new Error(`HTTP ${res.status} ${txt.slice(0, 80)}`);
           }
@@ -234,7 +236,7 @@
           if (!isJson) {
             const txt = await res.text().catch(() => "");
             if (txt.toLowerCase().includes("too many")) {
-              throw new Error("429 Too many requests (OpenSky limite)");
+              throw new Error("429 Too many requests");
             }
             throw new Error(`Réponse non-JSON: ${txt.slice(0, 80)}`);
           }
@@ -244,17 +246,28 @@
           lastErr = e;
         }
       }
-
       throw lastErr || new Error("Fetch failed");
     }
 
     // =========================
-    // Refresh (bbox = zone visible) + anti-spam fort
+    // Refresh: plus de refresh sur move/zoom
+    // - seulement timer 60s
+    // - bouton ↻ pour forcer
+    // - backoff si 429
     // =========================
-    async function refresh() {
+    async function refresh(force = false) {
       const now = Date.now();
       if (inFlight) return;
-      if (now - lastFetch < 20000) return; // min 20s entre appels
+
+      // backoff après 429
+      if (!force && now < backoffUntil) {
+        const s = Math.ceil((backoffUntil - now) / 1000);
+        statusEl.textContent = `Limité (OpenSky). Réessaie dans ${s}s`;
+        return;
+      }
+
+      // anti-spam
+      if (!force && now - lastFetch < 60000) return; // 60s mini
       lastFetch = now;
 
       try {
@@ -305,7 +318,9 @@
       } catch (e) {
         const msg = String(e.message || "");
         if (msg.includes("429")) {
-          statusEl.textContent = "Trop de requêtes (OpenSky). Attends ~1 min puis réessaie.";
+          // backoff 90s
+          backoffUntil = Date.now() + 90000;
+          statusEl.textContent = "Trop de requêtes (OpenSky). Attends ~1m30 puis ↻.";
         } else {
           statusEl.textContent = `Erreur API/proxy (${msg.slice(0, 60)})`;
         }
@@ -315,12 +330,9 @@
       }
     }
 
-    // Refresh quand tu bouges/zoomes (protégé par anti-spam)
-    map.on('moveend zoomend', refresh);
-
-    // Démarrage + refresh régulier (60s pour éviter 429)
-    refresh();
-    setInterval(refresh, 60000);
+    // Démarrage + refresh automatique toutes les 60s
+    refresh(true);
+    setInterval(() => refresh(false), 60000);
   </script>
 </body>
 </html>
