@@ -19,11 +19,27 @@
       padding: 10px 12px;
       border-radius: 10px;
       box-shadow: 0 6px 20px rgba(0,0,0,.12);
+      max-width: 320px;
     }
     .hud b { display:block; margin-bottom:4px; }
     .hud small { color:#444; }
 
-    /* Optionnel: enlève les marges autour du SVG dans le divIcon */
+    /* Bouton Leaflet custom */
+    .leaflet-control-mypos button{
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 10px;
+      background: rgba(255,255,255,.92);
+      box-shadow: 0 6px 20px rgba(0,0,0,.12);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 40px;
+    }
+    .leaflet-control-mypos button:hover{
+      background: rgba(255,255,255,1);
+    }
+
     .planeWrap { width: 32px; height: 32px; }
   </style>
 </head>
@@ -40,7 +56,7 @@
   <script src="https://unpkg.com/leaflet-rotatedmarker/leaflet.rotatedMarker.js"></script>
 
   <script>
-    // 1) Carte monde
+    // 1) Carte monde (fallback)
     const map = L.map('map').setView([20, 0], 2);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -51,15 +67,17 @@
     const statusEl = document.getElementById('status');
     const markers = new Map();
 
-    // 2) Icône avion jaune/orangé (SVG)
+    // 2) Icône avion jaune/orangé (SVG) + pas de stroke (anti “rouge”)
     const planeIcon = L.divIcon({
       className: '',
       html: `
         <div class="planeWrap">
           <svg width="32" height="32" viewBox="0 0 24 24"
-               xmlns="http://www.w3.org/2000/svg"
-               style="display:block; fill:#FFA500;">
-            <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3-1 3 1v-1.5L13 19v-5.5l8 2.5z"/>
+              xmlns="http://www.w3.org/2000/svg"
+              fill="#FFA500" stroke="none" stroke-width="0"
+              style="display:block;">
+            <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3-1 3 1v-1.5L13 19v-5.5l8 2.5z"
+                  fill="#FFA500" stroke="none" stroke-width="0"/>
           </svg>
         </div>
       `,
@@ -67,7 +85,101 @@
       iconAnchor: [16, 16]
     });
 
-    // 3) Ajout / mise à jour marker (avec rotation)
+    // 3) Marqueur position utilisateur (optionnel visuel)
+    let myPosMarker = null;
+    let myPosCircle = null;
+
+    function showMyPosition(lat, lon, accuracyMeters) {
+      const latlng = [lat, lon];
+
+      if (!myPosMarker) {
+        myPosMarker = L.circleMarker(latlng, {
+          radius: 6,
+          weight: 2,
+          opacity: 1,
+          fillOpacity: 0.8
+        }).addTo(map);
+
+        myPosMarker.bindPopup("Ma position");
+      } else {
+        myPosMarker.setLatLng(latlng);
+      }
+
+      if (accuracyMeters != null && !Number.isNaN(accuracyMeters)) {
+        if (!myPosCircle) {
+          myPosCircle = L.circle(latlng, {
+            radius: Math.max(accuracyMeters, 25),
+            weight: 1,
+            opacity: 0.5,
+            fillOpacity: 0.08
+          }).addTo(map);
+        } else {
+          myPosCircle.setLatLng(latlng);
+          myPosCircle.setRadius(Math.max(accuracyMeters, 25));
+        }
+      }
+    }
+
+    // 4) Géolocalisation: centrage au chargement + fonction “recentrer”
+    function locateAndCenter({ center = true } = {}) {
+      if (!("geolocation" in navigator)) {
+        statusEl.textContent = "Géolocalisation non disponible";
+        return;
+      }
+
+      statusEl.textContent = "Localisation…";
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const acc = pos.coords.accuracy;
+
+          showMyPosition(lat, lon, acc);
+
+          if (center) {
+            map.setView([lat, lon], Math.max(map.getZoom(), 7));
+          }
+
+          // Recharge avions après centrage
+          refresh();
+        },
+        () => {
+          statusEl.textContent = "Localisation refusée / indisponible";
+        },
+        {
+          enableHighAccuracy: false,
+          timeout: 6000,
+          maximumAge: 60000
+        }
+      );
+    }
+
+    // Centrage automatique au démarrage (si autorisé)
+    locateAndCenter({ center: true });
+
+    // 5) Bouton “Recentrer sur moi” (control Leaflet)
+    const MyPosControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-control leaflet-control-mypos');
+        const btn = L.DomUtil.create('button', '', container);
+        btn.type = 'button';
+        btn.title = 'Recentrer sur moi';
+        btn.innerHTML = '📍';
+
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.on(btn, 'click', (e) => {
+          L.DomEvent.preventDefault(e);
+          locateAndCenter({ center: true });
+        });
+
+        return container;
+      }
+    });
+    map.addControl(new MyPosControl());
+
+    // 6) Ajout / mise à jour marker avion (avec rotation)
     function upsertMarker(id, lat, lon, heading, label) {
       const rot = (heading == null || Number.isNaN(heading)) ? 0 : heading;
       let m = markers.get(id);
@@ -88,13 +200,10 @@
       m.bindPopup(label);
     }
 
-    // 4) Rafraîchissement dynamique selon la zone visible
+    // 7) Rafraîchissement dynamique (bbox = zone visible)
     async function refresh() {
       try {
         const b = map.getBounds();
-
-        // Petite sécurité: si on est trop zoom-out (bbox énorme), l’API peut être capricieuse.
-        // On laisse quand même tenter.
         const bbox =
           `lamin=${b.getSouth()}&lomin=${b.getWest()}` +
           `&lamax=${b.getNorth()}&lomax=${b.getEast()}`;
@@ -103,7 +212,6 @@
 
         const url = `https://opensky-network.org/api/states/all?${bbox}`;
         const res = await fetch(url);
-
         if (!res.ok) throw new Error("API error " + res.status);
 
         const data = await res.json();
@@ -148,7 +256,7 @@
       }
     }
 
-    // Recharge quand tu bouges ou zoomes
+    // Refresh quand on bouge / zoom
     map.on('moveend zoomend', refresh);
 
     // Démarrage + refresh régulier
@@ -157,3 +265,7 @@
   </script>
 </body>
 </html>
+
+
+
+
