@@ -210,7 +210,9 @@
 
         statusEl.textContent = "Chargement avions…";
 
-        const url = `https://opensky-network.org/api/states/all?${bbox}`;
+        const url = `https://api.allorigins.win/raw?url=${encodeURIComponent(
+  `https://opensky-network.org/api/states/all?${bbox}`
+)}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error("API error " + res.status);
 
