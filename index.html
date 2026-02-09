@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SkyTrack (world)</title>
+  <title>SkyTrack</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
@@ -24,7 +24,6 @@
     .hud b { display:block; margin-bottom:4px; }
     .hud small { color:#444; }
 
-    /* Bouton Leaflet custom */
     .leaflet-control-mypos button{
       width: 40px;
       height: 40px;
@@ -56,8 +55,10 @@
   <script src="https://unpkg.com/leaflet-rotatedmarker/leaflet.rotatedMarker.js"></script>
 
   <script>
-    // 1) Carte monde (fallback)
-    const map = L.map('map').setView([20, 0], 2);
+    // =========================
+    // Carte + UI
+    // =========================
+    const map = L.map('map').setView([20, 0], 2); // fallback monde
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -67,7 +68,9 @@
     const statusEl = document.getElementById('status');
     const markers = new Map();
 
-    // 2) Icône avion jaune/orangé (SVG) + pas de stroke (anti “rouge”)
+    // =========================
+    // Icône avion jaune/orangé (SVG) sans contour (anti rouge)
+    // =========================
     const planeIcon = L.divIcon({
       className: '',
       html: `
@@ -85,7 +88,9 @@
       iconAnchor: [16, 16]
     });
 
-    // 3) Marqueur position utilisateur (optionnel visuel)
+    // =========================
+    // Position utilisateur
+    // =========================
     let myPosMarker = null;
     let myPosCircle = null;
 
@@ -99,34 +104,32 @@
           opacity: 1,
           fillOpacity: 0.8
         }).addTo(map);
-
         myPosMarker.bindPopup("Ma position");
       } else {
         myPosMarker.setLatLng(latlng);
       }
 
       if (accuracyMeters != null && !Number.isNaN(accuracyMeters)) {
+        const r = Math.max(accuracyMeters, 25);
         if (!myPosCircle) {
           myPosCircle = L.circle(latlng, {
-            radius: Math.max(accuracyMeters, 25),
+            radius: r,
             weight: 1,
             opacity: 0.5,
             fillOpacity: 0.08
           }).addTo(map);
         } else {
           myPosCircle.setLatLng(latlng);
-          myPosCircle.setRadius(Math.max(accuracyMeters, 25));
+          myPosCircle.setRadius(r);
         }
       }
     }
 
-    // 4) Géolocalisation: centrage au chargement + fonction “recentrer”
     function locateAndCenter({ center = true } = {}) {
       if (!("geolocation" in navigator)) {
-        statusEl.textContent = "Géolocalisation non disponible";
+        statusEl.textContent = "Géolocalisation non dispo";
         return;
       }
-
       statusEl.textContent = "Localisation…";
 
       navigator.geolocation.getCurrentPosition(
@@ -136,10 +139,7 @@
           const acc = pos.coords.accuracy;
 
           showMyPosition(lat, lon, acc);
-
-          if (center) {
-            map.setView([lat, lon], Math.max(map.getZoom(), 7));
-          }
+          if (center) map.setView([lat, lon], Math.max(map.getZoom(), 7));
 
           // Recharge avions après centrage
           refresh();
@@ -147,18 +147,14 @@
         () => {
           statusEl.textContent = "Localisation refusée / indisponible";
         },
-        {
-          enableHighAccuracy: false,
-          timeout: 6000,
-          maximumAge: 60000
-        }
+        { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
       );
     }
 
-    // Centrage automatique au démarrage (si autorisé)
+    // Centrage au chargement (si autorisé)
     locateAndCenter({ center: true });
 
-    // 5) Bouton “Recentrer sur moi” (control Leaflet)
+    // Bouton "Recentrer sur moi"
     const MyPosControl = L.Control.extend({
       options: { position: 'topright' },
       onAdd: function() {
@@ -179,7 +175,9 @@
     });
     map.addControl(new MyPosControl());
 
-    // 6) Ajout / mise à jour marker avion (avec rotation)
+    // =========================
+    // Avions: markers + rotation
+    // =========================
     function upsertMarker(id, lat, lon, heading, label) {
       const rot = (heading == null || Number.isNaN(heading)) ? 0 : heading;
       let m = markers.get(id);
@@ -190,7 +188,6 @@
           rotationAngle: rot,
           rotationOrigin: "center center"
         }).addTo(map);
-
         markers.set(id, m);
       } else {
         m.setLatLng([lat, lon]);
@@ -200,9 +197,51 @@
       m.bindPopup(label);
     }
 
-    // 7) Rafraîchissement dynamique (bbox = zone visible)
+    // =========================
+    // Fetch robuste: 2 proxys + anti-spam
+    // =========================
+    let inFlight = false;
+    let lastFetch = 0;
+
+    function buildProxyUrls(bbox) {
+      const upstream = `https://opensky-network.org/api/states/all?${bbox}`;
+      const u = encodeURIComponent(upstream);
+
+      // Proxy 1
+      const p1 = `https://corsproxy.io/?${u}`;
+      // Proxy 2 (fallback)
+      const p2 = `https://api.allorigins.win/raw?url=${u}`;
+
+      return [p1, p2];
+    }
+
+    async function fetchWithFallback(urls) {
+      let lastErr = null;
+
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          if (!res.ok) {
+            const t = await res.text().catch(() => "");
+            throw new Error(`HTTP ${res.status} ${t.slice(0, 80)}`);
+          }
+          return await res.json();
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error("Fetch failed");
+    }
+
     async function refresh() {
+      const now = Date.now();
+      if (inFlight) return;
+      if (now - lastFetch < 8000) return; // min 8s entre 2 appels
+      lastFetch = now;
+
       try {
+        inFlight = true;
+
         const b = map.getBounds();
         const bbox =
           `lamin=${b.getSouth()}&lomin=${b.getWest()}` +
@@ -210,21 +249,14 @@
 
         statusEl.textContent = "Chargement avions…";
 
-        const url = `https://api.allorigins.win/raw?url=${encodeURIComponent(
-  `https://opensky-network.org/api/states/all?${bbox}`
-)}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("API error " + res.status);
+        const urls = buildProxyUrls(bbox);
+        const data = await fetchWithFallback(urls);
 
-        const data = await res.json();
         const states = data.states || [];
-
         statusEl.textContent = `Avions visibles: ${states.length}`;
 
         const seen = new Set();
 
-        // states format:
-        // 0=icao24, 1=callsign, 5=lon, 6=lat, 10=heading, 13=geo_altitude
         for (const s of states) {
           const icao24 = s[0];
           const callsign = (s[1] || "").trim() || icao24;
@@ -253,21 +285,19 @@
         }
 
       } catch (e) {
-        statusEl.textContent = "Limite API / erreur (réessaie)…";
+        statusEl.textContent = `Erreur API/proxy (${String(e.message).slice(0, 60)})`;
         console.log(e);
+      } finally {
+        inFlight = false;
       }
     }
 
-    // Refresh quand on bouge / zoom
+    // Refresh quand tu bouges/zoomes, mais protégé par anti-spam
     map.on('moveend zoomend', refresh);
 
-    // Démarrage + refresh régulier
+    // Démarrage + refresh régulier (plus long pour éviter rate-limit)
     refresh();
-    setInterval(refresh, 12000);
+    setInterval(refresh, 30000);
   </script>
 </body>
 </html>
-
-
-
-
