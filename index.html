@@ -19,7 +19,7 @@
       padding: 10px 12px;
       border-radius: 10px;
       box-shadow: 0 6px 20px rgba(0,0,0,.12);
-      max-width: 320px;
+      max-width: 340px;
     }
     .hud b { display:block; margin-bottom:4px; }
     .hud small { color:#444; }
@@ -35,9 +35,7 @@
       font-size: 18px;
       line-height: 40px;
     }
-    .leaflet-control-mypos button:hover{
-      background: rgba(255,255,255,1);
-    }
+    .leaflet-control-mypos button:hover{ background: rgba(255,255,255,1); }
 
     .planeWrap { width: 32px; height: 32px; }
   </style>
@@ -56,7 +54,7 @@
 
   <script>
     // =========================
-    // Carte + UI
+    // Carte
     // =========================
     const map = L.map('map').setView([20, 0], 2); // fallback monde
 
@@ -69,7 +67,7 @@
     const markers = new Map();
 
     // =========================
-    // Icône avion jaune/orangé (SVG) sans contour (anti rouge)
+    // Icône avion orange (SVG) sans stroke (anti rouge)
     // =========================
     const planeIcon = L.divIcon({
       className: '',
@@ -89,7 +87,7 @@
     });
 
     // =========================
-    // Position utilisateur
+    // Position utilisateur + bouton
     // =========================
     let myPosMarker = null;
     let myPosCircle = null;
@@ -130,6 +128,7 @@
         statusEl.textContent = "Géolocalisation non dispo";
         return;
       }
+
       statusEl.textContent = "Localisation…";
 
       navigator.geolocation.getCurrentPosition(
@@ -141,7 +140,6 @@
           showMyPosition(lat, lon, acc);
           if (center) map.setView([lat, lon], Math.max(map.getZoom(), 7));
 
-          // Recharge avions après centrage
           refresh();
         },
         () => {
@@ -154,7 +152,7 @@
     // Centrage au chargement (si autorisé)
     locateAndCenter({ center: true });
 
-    // Bouton "Recentrer sur moi"
+    // Bouton 📍
     const MyPosControl = L.Control.extend({
       options: { position: 'topright' },
       onAdd: function() {
@@ -176,7 +174,7 @@
     map.addControl(new MyPosControl());
 
     // =========================
-    // Avions: markers + rotation
+    // Markers avions (rotation)
     // =========================
     function upsertMarker(id, lat, lon, heading, label) {
       const rot = (heading == null || Number.isNaN(heading)) ? 0 : heading;
@@ -198,7 +196,7 @@
     }
 
     // =========================
-    // Fetch robuste: 2 proxys + anti-spam
+    // Fetch robuste (2 proxys) + gestion 429 + non-JSON
     // =========================
     let inFlight = false;
     let lastFetch = 0;
@@ -209,7 +207,7 @@
 
       // Proxy 1
       const p1 = `https://corsproxy.io/?${u}`;
-      // Proxy 2 (fallback)
+      // Proxy 2
       const p2 = `https://api.allorigins.win/raw?url=${u}`;
 
       return [p1, p2];
@@ -221,22 +219,42 @@
       for (const url of urls) {
         try {
           const res = await fetch(url, { cache: "no-store" });
+
+          const ct = (res.headers.get("content-type") || "").toLowerCase();
+          const isJson = ct.includes("application/json");
+
           if (!res.ok) {
-            const t = await res.text().catch(() => "");
-            throw new Error(`HTTP ${res.status} ${t.slice(0, 80)}`);
+            const txt = await res.text().catch(() => "");
+            if (res.status === 429 || txt.toLowerCase().includes("too many")) {
+              throw new Error("429 Too many requests (OpenSky limite)");
+            }
+            throw new Error(`HTTP ${res.status} ${txt.slice(0, 80)}`);
           }
+
+          if (!isJson) {
+            const txt = await res.text().catch(() => "");
+            if (txt.toLowerCase().includes("too many")) {
+              throw new Error("429 Too many requests (OpenSky limite)");
+            }
+            throw new Error(`Réponse non-JSON: ${txt.slice(0, 80)}`);
+          }
+
           return await res.json();
         } catch (e) {
           lastErr = e;
         }
       }
+
       throw lastErr || new Error("Fetch failed");
     }
 
+    // =========================
+    // Refresh (bbox = zone visible) + anti-spam fort
+    // =========================
     async function refresh() {
       const now = Date.now();
       if (inFlight) return;
-      if (now - lastFetch < 8000) return; // min 8s entre 2 appels
+      if (now - lastFetch < 20000) return; // min 20s entre appels
       lastFetch = now;
 
       try {
@@ -276,7 +294,7 @@
           seen.add(icao24);
         }
 
-        // Nettoyage: enlève ceux qui ne sont plus renvoyés
+        // Nettoyage
         for (const [id, m] of markers.entries()) {
           if (!seen.has(id)) {
             map.removeLayer(m);
@@ -285,19 +303,24 @@
         }
 
       } catch (e) {
-        statusEl.textContent = `Erreur API/proxy (${String(e.message).slice(0, 60)})`;
+        const msg = String(e.message || "");
+        if (msg.includes("429")) {
+          statusEl.textContent = "Trop de requêtes (OpenSky). Attends ~1 min puis réessaie.";
+        } else {
+          statusEl.textContent = `Erreur API/proxy (${msg.slice(0, 60)})`;
+        }
         console.log(e);
       } finally {
         inFlight = false;
       }
     }
 
-    // Refresh quand tu bouges/zoomes, mais protégé par anti-spam
+    // Refresh quand tu bouges/zoomes (protégé par anti-spam)
     map.on('moveend zoomend', refresh);
 
-    // Démarrage + refresh régulier (plus long pour éviter rate-limit)
+    // Démarrage + refresh régulier (60s pour éviter 429)
     refresh();
-    setInterval(refresh, 30000);
+    setInterval(refresh, 60000);
   </script>
 </body>
 </html>
